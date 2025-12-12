@@ -1,0 +1,489 @@
+---
+title: "Case 3: Unit Roots, Cointegration and the Yield Curve"
+author: "Mischa Hermans, Christos Siotos, and Mart van der Vleuten"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+# Introduction
+
+## Overview
+In this case study we examine how U.S. Treasury yields of different maturities move over time and whether they share common long-run behavior. The economic literature of Hall et al. (1992) suggests that interest rates along the yield curve are I(1) and cointegrated wtih the amount of series - 1 cointegration relations. Our goal is to investigate this ourselves aswell, using different methods for determining the integration order and Johansen's system approach to determine the cointegration relations.
+
+We begin by exploring the `FedYieldCurve` dataset and by discussing visually the order of integration and cointegration. To formally determine this order of integration of each interest rate series we follow the Pantula principle and apply it with both asymptotic and bootstrap versions of the ADF test. We then revisit the results from a different perspective by considering multiple and panel unit root tests, as by Hall et al. (1992) the maturity structure of yields suggests that they share similar patterns.
+
+After establishing the order of integration, we turn to the question of cointegration. Using Johansen’s system approach, we determine how many long-run equilibrium relationships exist across the yield curve. This allows us to estimate a Vector Error Correcting Model which captures the cointegration relations. We conclude by studying impulse responses to understand how a shock in one maturity affects the other maturities.
+
+## Setup
+```{r, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+library(statespacer)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(bootUR)
+library(urca)
+library(vars)
+
+set.seed(123)
+```
+
+# Data 
+
+## Overview
+The FedYieldCurve dataset contains monthly U.S. Treasury yields for eight maturities from 1982 to 2022. These series allow us to study how short-, medium-, and long-term interest rates evolve over time and whether they share common long-run trends. Before conducting any tests, we load the data and show their features.
+
+## Exploring the Data
+We begin by visualizing the yield series in levels, first differences, and second differences. This helps us see whether the series look stationary and to determine the deterministics used in the pantula procedure later. We also examine correlations across maturities and inspect maturities individually. Finally, we study the term spread as a possible indication of cointegration.
+
+### Level plots
+```{r}
+# Import the data
+FedYieldCurve <- as_tibble(FedYieldCurve)
+yield_vars <- c("M3", "M6", "Y1", "Y2", "Y3", "Y5", "Y7", "Y10")
+
+# Convert to nicer format for plotting
+yield_long <- pivot_longer(data = FedYieldCurve,
+                           cols = all_of(yield_vars),
+                           names_to = "Maturity",
+                           values_to = "Yield")
+
+# Plot all level series
+ggplot(yield_long, aes(x = Month, y = Yield, colour = Maturity)) +
+  geom_line() +
+  labs(title = "US Treasury Yields (Levels)",
+       x = "Time",
+       y = "Yield (%)") +
+  theme_minimal()
+```
+
+The level series show a clear trend, which suggests nonstationarity.
+
+### First differences plots
+```{r}
+# Take first differences
+FedYieldCurve_diff <- mutate(FedYieldCurve, 
+                             across(all_of(yield_vars), 
+                                    ~ c(NA, diff(.)),
+                                    .names = "d_{.col}")
+)
+
+diff_vars <- paste0("d_", yield_vars)
+
+# Plot all first difference series
+yield_diff_long <- pivot_longer(data = FedYieldCurve_diff, 
+                                cols = all_of(diff_vars), 
+                                names_to = "Maturity", 
+                                values_to = "DiffYield") |>
+  mutate(Maturity = gsub("^d_", "", Maturity))
+
+ggplot(filter(yield_diff_long, !is.na(DiffYield)), 
+       aes(x = Month, y = DiffYield, colour = Maturity)) + 
+  geom_line() + 
+  labs(title = "First Differences of US Treasury Yields",
+       x = "Time", 
+       y = "DiffYield") + 
+  theme_minimal()
+```
+
+After differencing once, the series fluctuate around a constant mean, suggesting stationarity.
+
+### Second differences plots
+
+```{r}
+# Take second differences
+FedYieldCurve_diff2 <- FedYieldCurve %>% 
+  mutate(
+    across(
+      all_of(yield_vars),
+      ~ c(NA, NA, diff(., differences = 2)), 
+      .names = "d2_{.col}"
+    )
+  )
+
+diff2_vars <- paste0("d2_", yield_vars)
+
+# Plot the all second difference series
+yield_diff2_long <- FedYieldCurve_diff2 %>%
+  pivot_longer(
+    cols = all_of(diff2_vars),
+    names_to = "Maturity",
+    values_to = "Diff2Yield"
+  ) %>%
+  mutate(Maturity = gsub("^d2_", "", Maturity))
+
+ggplot(filter(yield_diff2_long, !is.na(Diff2Yield)),
+       aes(x = Month, y = Diff2Yield, colour = Maturity)) +
+  geom_line() +
+  labs(title = "Second Differences of US Treasury Yields",
+       x = "Time",
+       y = "Second Difference") +
+  theme_minimal()
+
+```
+
+Second differences also appear stationary.
+
+### Correlation matrix in levels
+```{r}
+cor_levels <- cor(dplyr::select(FedYieldCurve, dplyr::all_of(yield_vars)))
+cor_levels
+```
+
+Correlations across maturities are high (all above 0.93), indicating strong comovement.  
+This provides economic motivation for cointegration: yields appear to move togheter.
+
+### Individual Maturities and the Term Spread
+
+To better understand the behaviour of short- and long-term rates, we inspect the 3-month (M3) and 10-year (Y10) yields individually.  
+Both series appear nonstationary in levels but much more stationary in first differences.  
+We then construct the term spread (Y10 − M3), which is a linear combination of two series. Thus, if both yields look I(1), but the term spread looks I(0), this would be an early indication of cointegration.
+
+```{r, warning=FALSE}
+# Plot M3 in levels
+ggplot(FedYieldCurve, aes(x = Month, y = M3)) + 
+  geom_line() +
+  labs(title = "3-month Treasury Yield",
+       y = "M3 (%)", 
+       x = "Time") + 
+  theme_minimal()
+
+# Plot M3 in levels first-differences
+ggplot(FedYieldCurve_diff, aes(x = Month, y = d_M3)) + 
+  geom_line() + 
+  labs(title = "First Difference of 3-Month Treasury Yield",
+       x = "Time", 
+       y = "First-Difference M3") + 
+  theme_minimal()
+
+# Plot Y10 in levels
+ggplot(FedYieldCurve, aes(x = Month, y = Y10)) + 
+  geom_line() +
+  labs(title = "10-year Treasury Yield",
+       y = "Y10 (%)", 
+       x = "Time") + 
+  theme_minimal() 
+
+# Plot Y10 in levels first-differences
+ggplot(FedYieldCurve_diff, aes(x = Month, y = d_Y10)) + 
+  geom_line() + 
+  labs(title = "First Difference of 10-year Treasury Yield", 
+       x = "Time", 
+       y = "Frist-Difference Y10") + 
+  theme_minimal()
+
+# Plot term spread between M3 and Y10
+ggplot(FedYieldCurve, aes(x = Month, y = Y10 - M3)) +
+  geom_line() +
+  labs(title = "Term Spread: 10-Year Minus 3-Month",
+       x = "Time",
+       y = "Y10 − M3 (%)") +
+  theme_minimal()
+
+
+```
+
+From the individual plots of M3 and Y10, the level series look nonstationary, while their first differences look stationary. This suggests that both series behave like I(1) processes. However, when we plot the term spread (Y10 − M3), the spread itself looks stationary. As a stationary linear combination of two I(1) series is the definition of cointegration, this visual evidence suggests that M3 and Y10 may be cointegrated. We will now begin by formally testing this possible cointegration.
+
+# Determining the Order of Integration
+
+To determine the order of integration of each yield series, we apply the Pantula principle. The idea is to run unit root tests on successively lower differencing levels, starting from the most differenced version of the series. The steps are:
+
+- Test the highest differenced version dmax (e.g., second difference).  
+- If the unit root null is rejected, move to the first difference.  
+- Test the first difference; if rejected again, continue to the level series.  
+- The integration order is determined at the first stage where we fail to reject the null of a unit root. If the first non-rejection occurs at differencing level \( d \), the series is classified as \( I(d+1) \).
+
+If we began by testing the level series and failed to reject the unit root null, we still would not know whether the series is truly I(1). To conclude I(1), we must verify that the first difference is stationary, but by starting at the level we have not yet checked this. So a non-rejection at the level does not immediately identify the integration order.
+
+The Pantula principle avoids this by starting from the most differenced form, where stationarity is most likely. If the most differenced series rejects the unit root, we step down one level and test again. The first point where we fail to reject the unit root identifies the smallest amount of differencing needed to achieve stationarity, which determines the integration order.
+
+## Pantula Principle Function
+
+```{r}
+pantula <- function(series, 
+                    dmax = 2, 
+                    deterministics_list = NULL, 
+                    unitroot_test,        # e.g. adf() or boot_adf()
+                    alpha = 0.05) {
+  
+  series <- as.numeric(series)
+  
+  # If deterministics_list is provided, it must contain one entry per test step
+  if (!is.null(deterministics_list)) {
+    stopifnot(length(deterministics_list) == dmax + 1)
+  }
+  
+
+  # Create differenced series
+  diff_orders <- dmax:0
+  
+  diffs <- lapply(diff_orders, function(d) {
+    if (d == 0) {
+      series
+    } else {
+      diff(series, differences = d)
+    }
+  })
+  
+  diff_names <- ifelse(diff_orders > 0, paste0("d", diff_orders), "level")
+  names(diffs) <- diff_names
+  
+  results <- data.frame(
+    diff_level     = diff_names,
+    diff_order     = diff_orders,
+    deterministics = if (!is.null(deterministics_list)) deterministics_list else NA,
+    p_value        = NA_real_,
+    reject         = NA
+  )
+  
+  # Pantula sequence loop
+  for (i in seq_along(diffs)) {
+    
+    # Take provided deterministics if the provide tests uses them
+    if (!is.null(deterministics_list)) {
+      test_result <- unitroot_test(
+        diffs[[i]], 
+        deterministics = deterministics_list[i]
+      )
+    } else {
+      test_result <- unitroot_test(diffs[[i]])
+    }
+    
+    pval   <- test_result$p.value
+    reject <- (pval < alpha)
+    
+    results$p_value[i] <- pval
+    results$reject[i]  <- reject
+    
+    # Stop at the first non-rejection
+    if (!reject) {
+      I_order <- diff_orders[i] + 1
+      return(list(table = results, I = I_order))
+    }
+  }
+  
+  # If every test rejected, treat series as I(0)
+  list(table = results, I = 0)
+}
+```
+
+## Pantula Principle with Asymptotic ADF
+
+For the ADF Pantula procedure we must specify the deterministic components in each test equation. Since the first and second differences of all yield series show no trend in the plots, we use only a constant in those test. The level series clearly display a trend, so the test at the level includes both a constant and a trend. This deterministic structure is supplied to the Pantula function when applying the ADF or bootstrap ADF tests.
+
+```{r}
+# Deterministics used for d2, d1, and level
+deterministics_list <- c("intercept", "intercept", "trend")
+
+# Apply Pantula principle with asymptotic ADF test
+pantula_asymptotic <- lapply(FedYieldCurve, function(x) {
+  pantula(x,
+          dmax = 2,
+          deterministics_list = deterministics_list,
+          unitroot_test = adf)
+})
+
+names(pantula_asymptotic) <- names(FedYieldCurve)
+
+# Collect p-values into a table
+pval_table <- sapply(pantula_asymptotic, function(res) res$table$p_value)
+pval_table_rounded <- round(pval_table, 3)
+rownames(pval_table_rounded) <- pantula_asymptotic[[1]]$table$diff_level
+pval_table_rounded
+```
+
+The asymptotic ADF Pantula results show that for all maturities the unit root null is rejected at every stage, including at the level test. According to the Pantula rule, this implies that each series would be classified as trend-stationary. 
+
+However, this conclusion is not consistent with the economic theory of Hall et al. (1992), who argue that yield curve data should behave like I(1) processes. The discrepancy arises because the asymptotic p-values used in the classical ADF test rely on large-sample theory. With a smaller sample such as ours, these asymptotic critical values may not be accurate.
+
+For this reason, we next apply a bootstrap ADF Pantula procedure, which produces critical values based on the quantiles and therefore avoids relying on asymptotics
+
+## Pantula Principle with Bootstrap ADF
+
+The bootstrap ADF test improves on the asymptotic test by generating its own empirical distribution for the test statistic. This avoids the reliance on asymptotic critical values, which may not be appropriate in smaller samples. Instead of comparing test statistics to theoretical limiting distributions, the bootstrap looks at the quantiles to determine when to reject.
+
+By using these bootstrap critical values inside the Pantula principle, we obtain more reliable decisions about unit roots and integration orders. The bootstrap Pantula procedure is therefore better for assessing whether the yield series are truly I(1), as suggested by the yield curve theory.
+
+```{r}
+# Apply Pantula principle with bootstrap ADF test
+pantula_bootstrap <- lapply(FedYieldCurve, function(x) {
+  pantula(x,
+          dmax = 2,
+          deterministics_list = deterministics_list,
+          unitroot_test = function(z, ...) boot_adf(z, show_progress = FALSE, ...))
+})
+
+names(pantula_bootstrap) <- names(FedYieldCurve)
+
+# Collect p-values into a table
+pval_table <- sapply(pantula_bootstrap, function(res) res$table$p_value)
+pval_table_rounded <- round(pval_table, 3)
+rownames(pval_table_rounded) <- pantula_bootstrap[[1]]$table$diff_level
+pval_table_rounded
+```
+
+The bootstrap Pantula results show that for every maturity the first non-rejection occurs at the level test. According to the Pantula rule, this implies an integration order of I(1) for all eight yield series.
+
+As Hall et al. (1992) state that it is generally accepted that these yields are I(1). Unlike the asymptotic ADF test, which tended to over reject the unit root null, the bootstrap delivers decisions consistent with this economic theory and the visual behaviour of the yield data.
+
+Hence, based on the bootstrap ADF Pantula procedure, we conclude that all yield series in the FedYieldCurve dataset are I(1).
+
+## Pantula Principle with Bootstrap Union of Rejection
+
+Thus far, both the asymptotic ADF and the bootstrap ADF Pantula procedures required us to choose the deterministic components for each testing step. The bootstrap union-of-rejections method avoids this choice altogether. 
+
+The idea is that different deterministic specifications lead to tests with different power properties: one specification may detect stationarity when another does not. Instead of choosing between them, the union test performs multiple versions of the test simultaneously and rejects the unit root whenever any of the individual tests rejects. As multiple tests are combined, a Bonferroni-type adjustment is applied to maintain the correct overall size. 
+
+By using this union approach, we do not need to decide which deterministic specification is appropriate, and the Pantula procedure can be applied without manually selecting deterministics at each differencing level.
+
+```{r}
+# Apply Pantula principle with union of rejection test
+pantula_union <- lapply(FedYieldCurve, function(x) {
+  pantula(x, dmax = 2, unitroot_test = function(z, ...) boot_union(z, show_progress = FALSE, ...))
+})
+
+names(pantula_union) <- names(FedYieldCurve)
+
+# p-value table
+pval_table <- sapply(pantula_union, function(res) res$table$p_value)
+pval_table_rounded <- round(pval_table, 3)
+rownames(pval_table_rounded) <- pantula_union[[1]]$table$diff_level
+pval_table_rounded
+```
+
+The bootstrap union-of-rejections Pantula results again show that the first non-rejection occurs at the level test for all maturities. According to the Pantula rule, this implies that every yield series is I(1). Thus, both bootstrap procedures agree that all eight yield series are integrated of order one.
+
+# Multiple and Panel Unit Root Tests
+
+We have so far tested each maturity separately. However, economic theory (Hall et al., 1992) suggests that all interest rates along the yield curve should behave similarly in terms of their integration properties. 
+If we think the series share the same order of integration, it becomes attractive to use multiple or panel unit root tests. These tests pool information across maturities, increasing power compared to running eight separate univariate ADF tests.  
+
+- **Multiple unit root tests** (Smeekes, 2015) adjust for multiple testing while maintaining the test size.  
+- **Panel unit root tests** (Palm et al., 2011) treat the maturities as a panel and test for a unit root jointly.
+
+Since the yield curve series are strongly correlated and expected to be cointegrated, these joint tests can provide more reliable evidence about whether all series are indeed I(1).
+
+## Multiple Unit Root Test (Smeekes, 2015)
+
+The sequential multiple unit root test of Smeekes (2015) corrects for multiple testing when evaluating several individual unit root hypotheses. The procedure first orders the individual ADF-type test statistics from most to least significant. If even the most significant statistic cannot reject the null of a unit root, the procedure stops, meaning there is no evidence that any series is stationary, while controlling the overall probability of false rejections.
+
+```{r}
+seq_test <- boot_sqt(FedYieldCurve[, yield_vars], show_progress = FALSE)
+seq_test
+```
+
+The multiple unit root test does not reject any individual unit root hypothesis after controlling for multiple testing, indicating no evidence that any maturity series is stationary. This outcome is consistent with all yields behaving as I(1).
+
+## Panel Unit Root Test (Palm et al., 2011)
+
+The panel unit root test jointly evaluates, in an Anova type of way, whether each series in the panel has a unit root.
+
+```{r}
+panel_test <- boot_panel(FedYieldCurve[, yield_vars], show_progress = FALSE)
+panel_test
+```
+
+Both the sequential multiple test and the panel unit root test do not reject the null of a unit root for the yield series. This result supports the earlier findings from the bootstrap Pantula principle and union of rejection that each maturity is I(1).  
+
+Since all yields appear to be I(1), we proceed to the Johansen system approach to investigate whether the long-run equilibrium relations implied by theory (i.e., \( n-1 \) cointegration vectors) are present in the data.
+
+# Determining the Cointegration Rank and Relationships
+
+To analyze the long-run relationships between the yield series, we use the Johansen cointegration procedure. Johansen’s method is based on estimating a VAR(\(p\)) model in its Vector Error Correction (VECM) representation. 
+
+Before we can apply the Johansen test, we must first determine the appropriate lag order \(p\) for the underlying VAR model, since this choice affects the VECM structure and the resulting likelihood-based test statistics.
+
+## Determining the VAR(p) Lag Order
+
+```{r}
+# Select lag order for VAR using information criteria
+lag_selection <- VARselect(FedYieldCurve[, yield_vars], lag.max = 10, type = "const")
+lag_selection$selection
+
+# Choose AIC lag order, but almost all IC's agree
+lag_chosen <- lag_selection$selection["AIC(n)"]
+```
+
+Using the AIC criterion, we select a VAR lag order of **2**, which will be used in the subsequent Johansen procedure; all but one IC came to the same lag order conclusion.
+
+## Determining the cointegration rank
+
+Before we can estimate the VECM model, we need to know the cointegration rank \(r\) (or as in the slides denoted by h). We use two likelihood‐ratio based tests:
+
+- **Trace test**  
+- **Maximum eigenvalue test**  
+
+Both tests proceed sequentially: starting with the null hypothesis \(r = 0\), we continue increasing \(r\) until we fail to reject. The value of \(r\) at the point of first non-rejection is the estimated cointegration rank.
+
+
+```{r}
+# Trace test
+joh_trace <- ca.jo(
+  FedYieldCurve[, yield_vars],
+  type  = "trace",
+  ecdet = "none",
+  K     = lag_chosen
+)
+
+# Maximum eigenvalue test
+joh_eigen <- ca.jo(
+  FedYieldCurve[, yield_vars],
+  type  = "eigen",
+  ecdet = "none",
+  K     = lag_chosen
+)
+
+summary(joh_trace)
+summary(joh_eigen)
+```
+
+The Johansen trace test suggests a cointegration rank of 6, while the maximum eigenvalue test suggests a slightly lower rank of 5. According to Hall et al. (1992), the yield curve should exhibit \(n - 1\) cointegration relations, meaning 8 variables imply 7 long-run equilibrium relationships. Since the trace test result aligns more closely with this theoretical expectation, we proceed by setting the cointegration rank to \(r = 6\) for the subsequent VECM estimation.
+
+## Estimating the VECM model
+
+```{r}
+r <- 6
+
+# Estimate the VECM model
+vecm_est <- cajorls(joh_trace, r)
+
+# Extract its results
+alpha <- joh_trace@W[, 1:6]
+beta  <- joh_trace@V[, 1:6]
+gamma <- vecm_est$rlm$coefficients
+
+alpha
+beta
+gamma
+```
+
+## Impulse Response Analysis
+
+To conclude our VECM analysis, we study the reduced-form impulse response functions. Because IRFs are defined for the VAR representation of the system, we first convert the estimated VECM into its equivalent VAR form using `vec2var()`. This VAR representation preserves the long-run restrictions implied by the cointegration structure while allowing us to trace out how shocks moves through the system.
+
+The IRFs below show how shocks to a short-term rate (M3) and a medium-term rate (Y3) affect the entire yield curve over a 24-month horizon, with bootstrap confidence intervals capturing the estimation uncertainty.
+
+We report orthogonalized impulse response functions. This orthogonalization removes simultaneous correlation between the shocks, ensuring that a shock to a given yield gives an isolated and uncorrelated innovation. We think this is important for our yield curve data, as maturities move strongly together within the same period. Using orthogonalized IRFs allows us to see how shocks influence the rest of the yield curve over time, instead of capturing movements that happen at the same time.
+
+```{r}
+# Convert the estimated VECM into its equivalent reduced-form VAR.
+vecm_var <- vec2var(joh_trace, r)
+
+# IRF for a shock to the short-term rate (M3)
+irf_results <- irf(vecm_var,
+                   impulse = "M3",      
+                   response = NULL,     
+                   n.ahead = 24,
+                   boot = TRUE,
+                   runs = 500)
+
+plot(irf_results)
+```
+
+The impulse responses show that a shock to the short-term interest rate (M3) has an immediate and positive impact on yields across all maturities. The effect is strongest at short maturities and gradually weakens as maturity increases. While the responses decline after the initial jump, they do not return to zero within the 24-month horizon. This persistence is consistent with the fact that yields are integrated of order one and thus shocks can have permanent effects.
