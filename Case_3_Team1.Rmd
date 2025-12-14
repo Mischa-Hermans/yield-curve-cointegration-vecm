@@ -199,9 +199,9 @@ To determine the order of integration of each yield series, we apply the Pantula
 - Test the first difference; if rejected again, continue to the level series.  
 - The integration order is determined at the first stage where we fail to reject the null of a unit root. If the first non-rejection occurs at differencing level \( d \), the series is classified as \( I(d+1) \).
 
-If we began by testing the level series and failed to reject the unit root null, we still would not know whether the series is truly I(1). To conclude I(1), we must verify that the first difference is stationary, but by starting at the level we have not yet checked this. So a non-rejection at the level does not immediately identify the integration order.
+If we began by testing the level series and failed to reject the unit root null, we would still not know whether the series is truly \(I(1)\) or instead \(I(2)\). More importantly, if the series were actually \(I(2)\), an ADF test applied to the level series would not have the standard Dickey–Fuller distribution, because the first differences included in the regression would still be non-stationary. In this case, the usual critical values would be invalid, and the test result could be misleading.
 
-The Pantula principle avoids this by starting from the most differenced form, where stationarity is most likely. If the most differenced series rejects the unit root, we step down one level and test again. The first point where we fail to reject the unit root identifies the smallest amount of differencing needed to achieve stationarity, which determines the integration order.
+The Pantula principle avoids this problem by starting from the most differenced form of the series, where stationarity is most likely. By moving step by step to lower differencing levels, unit root tests are only applied when their assumptions are satisfied. The first point at which we fail to reject the unit root therefore identifies the smallest amount of differencing required to achieve stationarity, which determines the integration order of the series.
 
 ## Pantula Principle Function
 
@@ -486,4 +486,5 @@ irf_results <- irf(vecm_var,
 plot(irf_results)
 ```
 
-The impulse responses show that a shock to the short-term interest rate (M3) has an immediate and positive impact on yields across all maturities. The effect is strongest at short maturities and gradually weakens as maturity increases. While the responses decline after the initial jump, they do not return to zero within the 24-month horizon. This persistence is consistent with the fact that yields are integrated of order one and thus shocks can have permanent effects.
+The impulse responses show that a shock to the short-term interest rate (M3) has an immediate and positive impact on yields across all maturities. The effect is strongest at short maturities and gradually weakens as maturity increases. While the responses decline after the initial jump, they do not return to zero within the 24-month horizon.
+
